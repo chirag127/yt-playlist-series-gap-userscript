@@ -2,16 +2,13 @@
 // @name         YT Playlist Series Gap
 // @namespace    https://github.com/chirag127
 // @version      1.0.0
-// @description  Finds missing and duplicate episode numbers in a playlist by reading the numbers out of video titles. Read-only.
+// @description  Reads episode numbers from playlist titles and reports missing and duplicate episodes within each range.
 // @author       chirag127
 // @license      MIT
 // @match        https://www.youtube.com/*
-// @icon         https://www.youtube.com/favicon.ico
-// @homepageURL  https://github.com/chirag127/yt-playlist-series-gap-userscript
-// @supportURL   https://github.com/chirag127/yt-playlist-series-gap-userscript/issues
-// @downloadURL  https://github.com/chirag127/yt-playlist-series-gap-userscript/raw/main/yt-playlist-series-gap.user.js
-// @updateURL    https://github.com/chirag127/yt-playlist-series-gap-userscript/raw/main/yt-playlist-series-gap.user.js
-// @require      https://raw.githubusercontent.com/chirag127/yt-core-lib/main/yt-core-lib-1.2.0.js
+// @require      https://raw.githubusercontent.com/chirag127/yt-core-lib/main/yt-core-lib-1.3.0.js
+// @downloadURL  https://raw.githubusercontent.com/chirag127/yt-playlist-series-gap-userscript/main/yt-playlist-series-gap.user.js
+// @updateURL    https://raw.githubusercontent.com/chirag127/yt-playlist-series-gap-userscript/main/yt-playlist-series-gap.user.js
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
@@ -23,127 +20,142 @@
 (function () {
   'use strict';
 
-  if (typeof Ytk === 'undefined') { console.error('[series-gap] core did not load'); return; }
-  if (!Ytk.featureOn('series', true)) return;
+  if (typeof Ytk === 'undefined') { console.error('[yt-playlist-series-gap] core did not load'); return; }
+  if (!Ytk.featureOn('seriesGap', true)) return;
 
-  var ROW_SELECTORS = ['yt-lockup-view-model', 'ytd-playlist-video-renderer', 'ytd-playlist-panel-video-renderer'];
+  const ROW_SEL = 'yt-lockup-view-model, ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer';
 
-  function playlistId() {
-    var q = new URLSearchParams(location.search).get('list');
-    if (q) return q;
-    var panel = document.querySelector('ytd-playlist-panel-renderer[playlist-id]');
-    return panel ? panel.getAttribute('playlist-id') : null;
+  function onPlaylistSurface() {
+    return location.pathname === '/playlist' || !!document.querySelector('ytd-playlist-panel-renderer');
   }
 
-  function rows() {
-    for (var i = 0; i < ROW_SELECTORS.length; i++) {
-      var found = Array.prototype.slice.call(document.querySelectorAll(ROW_SELECTORS[i]));
-      if (found.length) return found;
-    }
-    return [];
+  function raw() { return Ytk.storeGet('settings', {}) || {}; }
+
+  function rowRoot() {
+    const root = location.pathname === '/playlist'
+      ? document.querySelector('ytd-playlist-video-list-renderer') || document.querySelector('ytd-browse[page-subtype="playlist"]')
+      : document.querySelector('ytd-playlist-panel-renderer');
+    return root || null;
   }
 
-  function titleOf(node) {
-    var a = node.querySelector('yt-lockup-metadata-view-model h3 a, a#video-title');
-    if (!a) return '';
-    return (a.getAttribute('title') || a.textContent || '').trim();
+  function titles() {
+    const root = rowRoot();
+    if (!root) return [];
+    return Array.from(root.querySelectorAll(ROW_SEL)).map(function (node) {
+      const vm = node.data && node.data.lockupViewModel ? Ytk.lockupToItem(node.data.lockupViewModel) : null;
+      const titleEl = node.querySelector('yt-lockup-metadata-view-model h3 a, a#video-title, #video-title');
+      return String((vm && vm.title) || (titleEl && (titleEl.getAttribute('title') || titleEl.textContent)) || '').trim();
+    }).filter(Boolean);
   }
 
-  /** Group parsed titles into seasons and report missing / duplicate numbers. */
-  function analyse(videos) {
-    var numbered = [];
-    for (var i = 0; i < videos.length; i++) {
-      var e = Ytk.parseEpisode(videos[i].title);
-      if (e) numbered.push({ video: videos[i], episode: e.episode, season: e.season });
-    }
-    if (numbered.length < 3) {
-      return { ok: false, reason: 'Need at least 3 titles that contain an episode number. Found ' + numbered.length + '.' };
+  /**
+   * Group titles by season (or one pool), then report the holes inside each
+   * observed range and any episode number that appears twice.
+   */
+  function analyse(list, minTitles, bySeason) {
+    const numbered = list.map(function (title) { return { title: title, ep: Ytk.parseEpisode(title) }; })
+      .filter(function (x) { return x.ep; });
+    if (numbered.length < minTitles) {
+      return { ok: false, numbered: numbered.length, groups: [], reason: 'Only ' + numbered.length + ' title(s) carry an episode number; at least ' + minTitles + ' are needed for a range.' };
     }
 
-    var groups = {};
+    const groups = {};
     numbered.forEach(function (x) {
-      var key = x.season === null ? 'unseasoned' : 'season-' + x.season;
-      if (!groups[key]) groups[key] = [];
-      groups[key].push(x);
+      const key = bySeason ? 's' + (x.ep.season === null ? '?' : x.ep.season) : 'all';
+      (groups[key] = groups[key] || []).push(x);
     });
 
-    var report = [];
+    const result = [];
     Object.keys(groups).forEach(function (key) {
-      var list = groups[key].slice().sort(function (a, b) { return a.episode - b.episode; });
-      var present = {};
-      var counts = {};
-      list.forEach(function (x) {
-        present[x.episode] = true;
-        counts[x.episode] = (counts[x.episode] || 0) + 1;
+      const items = groups[key].slice().sort(function (a, b) { return a.ep.episode - b.ep.episode; });
+      const have = new Set(items.map(function (x) { return x.ep.episode; }));
+      const counts = {};
+      items.forEach(function (x) { counts[x.ep.episode] = (counts[x.ep.episode] || 0) + 1; });
+      const min = items[0].ep.episode;
+      const max = items[items.length - 1].ep.episode;
+      const missing = [];
+      for (let n = min; n <= max; n++) if (!have.has(n)) missing.push(n);
+      const duplicates = Object.keys(counts).filter(function (n) { return counts[n] > 1; })
+        .map(Number).sort(function (a, b) { return a - b; });
+      const season = key === 'all' ? null : (key === 's?' ? null : Number(key.slice(1)));
+      result.push({
+        label: key === 'all' ? 'All episodes' : key === 's?' ? 'Season unknown' : 'Season ' + season,
+        min: min, max: max, counted: items.length,
+        missing: missing, duplicates: duplicates,
+        duplicateTitles: items.filter(function (x) { return duplicates.indexOf(x.ep.episode) !== -1; })
       });
-      var min = list[0].episode;
-      var max = list[list.length - 1].episode;
-      var missing = [];
-      for (var n = min; n <= max; n++) if (!present[n]) missing.push(n);
-      var duplicated = Object.keys(counts).filter(function (k) { return counts[k] > 1; }).map(Number).sort(function (a, b) { return a - b; });
-      report.push({ group: key, min: min, max: max, count: list.length, missing: missing, duplicated: duplicated });
     });
-
-    return { ok: true, total: videos.length, numbered: numbered.length, report: report };
+    result.sort(function (a, b) { return (a.min - b.min) || String(a.label).localeCompare(String(b.label)); });
+    return { ok: true, numbered: numbered.length, groups: result };
   }
 
-  function show(videosOverride) {
-    var videos = videosOverride || rows().map(function (n) { return { title: titleOf(n) }; });
-    var result = analyse(videos);
+  function seriesGap() {
+    if (!onPlaylistSurface()) { Ytk.toast('Open a playlist first.'); return; }
+    const list = titles();
+    const minTitles = Math.max(2, Math.min(50, parseInt(raw().seriesGapMinTitles, 10) || 3));
+    const bySeason = raw().seriesGapBySeason === undefined ? true : !!raw().seriesGapBySeason;
+    const showUnnumbered = !!raw().seriesGapShowUnnumbered;
+    const report = analyse(list, minTitles, bySeason);
+    const unnumbered = list.filter(function (title) { return !Ytk.parseEpisode(title); });
 
     Ytk.panel('Series gaps', function (body) {
-      if (!result.ok) {
-        Ytk.note(body, result.reason, 'ytk2-warn');
-        Ytk.note(body, 'Episode numbers are read from titles: "S02E07", "Episode 7", "Ep. 7", "Part 7", "第7集", "#7".');
-        return;
+      Ytk.kv(body, 'Rows loaded', list.length);
+      Ytk.kv(body, 'With an episode number', report.numbered);
+      Ytk.note(body, 'Episode numbers come from the title text (S1E2, Episode 4, EP4, Part 2, #7, 第3集, “3. …”). Loaded rows only — scroll the playlist to load more before trusting a gap.', 'ytk2-dim');
+
+      if (!report.ok) {
+        Ytk.note(body, report.reason, 'ytk2-warn');
+      } else {
+        let clean = 0;
+        report.groups.forEach(function (g) {
+          Ytk.note(body, g.label + ' · ' + g.counted + ' episode(s) · range ' + g.min + '–' + g.max);
+          if (!g.missing.length && !g.duplicates.length) {
+            clean++;
+            Ytk.note(body, 'No gaps between ' + g.min + ' and ' + g.max + '.', 'ytk2-ok');
+            return;
+          }
+          if (g.missing.length) Ytk.note(body, 'Missing: ' + g.missing.join(', '), 'ytk2-warn');
+          if (g.duplicates.length) Ytk.note(body, 'Duplicate numbers: ' + g.duplicates.join(', '), 'ytk2-warn');
+          g.duplicateTitles.slice(0, 12).forEach(function (x) {
+            Ytk.note(body, '  E' + x.ep.episode + ' — ' + x.title, 'ytk2-dim');
+          });
+          if (g.duplicateTitles.length > 12) Ytk.note(body, '  …and ' + (g.duplicateTitles.length - 12) + ' more duplicate rows.');
+        });
+        if (clean === report.groups.length) Ytk.note(body, 'Every in-range episode number appears once.');
       }
-      Ytk.kv(body, 'Videos on the page', result.total);
-      Ytk.kv(body, 'With an episode number', result.numbered);
 
-      result.report.forEach(function (g) {
-        body.appendChild(Ytk.h('div', { style: 'height:10px' }));
-        Ytk.note(body, (g.group === 'unseasoned' ? 'No season in the title' : g.group) + ' — episodes ' + g.min + '..' + g.max + ', ' + g.count + ' present');
-        if (g.missing.length) Ytk.note(body, 'Missing: ' + g.missing.join(', '), 'ytk2-warn');
-        if (g.duplicated.length) Ytk.note(body, 'Duplicate numbers: ' + g.duplicated.join(', '), 'ytk2-warn');
-        if (!g.missing.length && !g.duplicated.length) Ytk.note(body, 'Nothing missing between ' + g.min + ' and ' + g.max, 'ytk2-ok');
-      });
-
-      Ytk.note(body, 'Videos without a number are ignored, so an unnumbered upload will look like a gap.');
+      if (showUnnumbered && unnumbered.length) {
+        Ytk.note(body, unnumbered.length + ' title(s) had no recognisable episode number:');
+        unnumbered.slice(0, 20).forEach(function (title) { Ytk.note(body, '  ' + title, 'ytk2-dim'); });
+        if (unnumbered.length > 20) Ytk.note(body, '  …and ' + (unnumbered.length - 20) + ' more.');
+      }
     });
   }
 
-  function deepScan() {
-    var id = playlistId();
-    if (!id) { Ytk.toast('Open a playlist page first'); return; }
-    Ytk.panel('Series gaps — scanning', function (body) { Ytk.note(body, 'Asking the API for every video…'); });
-    Ytk.enumeratePlaylist(id, function (n) { Ytk.toast(n + ' videos read'); })
-      .then(function (items) { show(items); })
-      .catch(function (err) { Ytk.panel('Series gaps', function (body) { Ytk.note(body, 'Scan failed: ' + err.message, 'ytk2-err'); }); });
-  }
+  const fields = [
+    { key: 'seriesGapMinTitles', label: 'Minimum numbered titles for a report', type: 'number', def: parseInt(raw().seriesGapMinTitles, 10) || 3, hint: '2–50. Below this, “no gaps” would be meaningless.' },
+    { key: 'seriesGapBySeason', label: 'Group by season when the title has one', type: 'checkbox', def: raw().seriesGapBySeason === undefined ? true : !!raw().seriesGapBySeason },
+    { key: 'seriesGapShowUnnumbered', label: 'List titles with no episode number', type: 'checkbox', def: !!raw().seriesGapShowUnnumbered }
+  ];
 
-  function settingsPopup() {
-    if (typeof Ytk.openSettings !== 'function') {
-      alert('The shared core is out of date (v' + Ytk.VERSION + '). Reinstall this script.');
-      return;
-    }
+  GM_registerMenuCommand('Settings…', function () {
+    const before = raw();
     Ytk.openSettings({
       title: 'YT Playlist Series Gap',
-      subtitle: 'Reads episode numbers out of titles and reports the holes. Read-only.',
+      subtitle: 'Missing and duplicate episode numbers, read from playlist titles.',
       sectionTitle: 'Detection',
-      fields: [
-        { key: 'seriesMinTitles', label: 'Minimum numbered titles before reporting', type: 'number', def: 3, min: 1 },
-        { key: 'seriesIgnoreSpecials', label: 'Ignore episodes numbered 0 (specials)', type: 'checkbox', def: true },
-        { key: 'seriesDeepScan', label: 'Use the API by default (slower, covers the whole playlist)', type: 'checkbox', def: false }
-      ],
-      actions: [
-        { label: 'Check this page now', run: function () { show(); } },
-        { label: 'Deep scan the whole playlist', run: deepScan }
-      ]
+      fields: fields,
+      // Core 1.2.0 keeps only its own settings keys on save; re-merge this script's keys.
+      onSave: function (next) { Ytk.storeSet('settings', Object.assign({}, before, next)); }
     });
+  });
+
+  let mounted = false;
+  function mount() {
+    if (mounted || !onPlaylistSurface()) return;
+    mounted = true;
+    Ytk.mountToolbar([{ label: 'Series gaps', run: seriesGap }]);
   }
-
-  if (!playlistId() && !rows().length) return;
-
-  Ytk.mountToolbar([{ label: 'Gaps', run: function () { show(); } }]);
-  if (typeof GM_registerMenuCommand === 'function') GM_registerMenuCommand('Settings…', settingsPopup);
+  mount();
+  if (!mounted) document.addEventListener('yt-navigate-finish', mount);
 })();
