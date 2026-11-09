@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Playlist Series Gap
 // @namespace    https://github.com/chirag127
-// @version      1.0.0
+// @version      1.0.1
 // @description  Reads episode numbers from playlist titles and reports missing and duplicate episodes within each range.
 // @author       chirag127
 // @license      MIT
@@ -13,6 +13,8 @@
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_registerMenuCommand
+// @grant        GM_xmlhttpRequest
+// @connect      *
 // @noframes
 // @run-at       document-idle
 // ==/UserScript==
