@@ -17,7 +17,8 @@ titles. Read-only.
    add a second regex table here — a pattern added in one place and not the other is how the
    two answers start disagreeing.
 5. **Never guess.** An unparseable title is skipped and counted, not assigned a number.
-6. **Core is required, pinned:** `@require …/yt-core-lib-1.2.0.js`.
+6. **Core is required, pinned:** `@require …/yt-core-lib-1.3.0.js`. 1.3.0 reuses the
+   `.ytk2-bar` already in the DOM; 1.2.0 drew one bar per script sandbox.
 
 ## Why the code looks the way it does
 
@@ -31,7 +32,9 @@ titles. Read-only.
 - **Loaded rows only.** Continuations render on scroll. The panel says so, because a gap
   computed from half a playlist is a false alarm — the one failure mode that makes this script
   untrustworthy.
-- **Settings survive because of `onSave`.** Core 1.2.0's `openSettings` rebuilds
+- **The AI grants stay.** The settings popup renders the AI section, which calls
+  `GM_xmlhttpRequest`; without that grant (and `@connect *`) its connection test fails.
+- **Settings survive because of `onSave`.** Core 1.3.0's `openSettings` rebuilds
   `ytk.settings` from its own defaults and drops keys it does not know
   (`seriesGapMinTitles`, `seriesGapBySeason`, `seriesGapShowUnnumbered`). The `onSave` merge
   restores them.
